@@ -32,7 +32,7 @@ if "results_ready" not in st.session_state:
     st.session_state.preview_rgb = None
     st.session_state.last_inputs_sig = None
     st.session_state.ndvi_bounds_4326 = None
-    st.session_state.last_inputs_sig = None
+    st.session_state.ndvi_png = None
 
 def input_signature(geojson_file, red_file, nir_file):
     # A simple signature so if user uploads different files we reset cached results
