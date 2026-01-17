@@ -8,6 +8,13 @@ import rasterio
 import streamlit as st
 from shapely.geometry import box
 import matplotlib.pyplot as plt
+import base64
+from io import BytesIO
+from PIL import Image
+import folium
+from streamlit_folium import st_folium
+from rasterio.warp import transform_bounds
+
 
 from core.indices import ndvi
 from core.zonal import zonal_stats_from_index_raster
@@ -23,6 +30,8 @@ if "results_ready" not in st.session_state:
     st.session_state.csv_bytes = None
     st.session_state.geojson_bytes = None
     st.session_state.preview_rgb = None
+    st.session_state.last_inputs_sig = None
+    st.session_state.ndvi_bounds_4326 = None
     st.session_state.last_inputs_sig = None
 
 def input_signature(geojson_file, red_file, nir_file):
@@ -53,6 +62,8 @@ if sig != st.session_state.last_inputs_sig:
     st.session_state.csv_bytes = None
     st.session_state.geojson_bytes = None
     st.session_state.preview_rgb = None
+    st.session_state.ndvi_png = None
+    st.session_state.ndvi_bounds_4326 = None
     st.session_state.last_inputs_sig = sig
 
 
@@ -119,6 +130,40 @@ def compute_ndvi_from_two_tiffs(red_bytes: bytes, nir_bytes: bytes):
             profile.update(dtype="float32", count=1)
 
             return index, profile
+
+def ndvi_to_rgba_png(ndvi_arr: np.ndarray, cmap_name: str = "RdYlGn") -> bytes:
+    """
+    Convert NDVI array (-1..1) to an RGBA PNG with NoData/NaN transparent.
+    Returns PNG bytes.
+    """
+    arr = np.clip(ndvi_arr.copy(), -1, 1)
+    mask = ~np.isfinite(arr)  # NaN/inf -> transparent
+
+    norm = (arr + 1) / 2.0
+    norm = np.clip(norm, 0, 1)
+
+    cmap = plt.get_cmap(cmap_name)
+    rgba = cmap(norm)  # float 0..1 RGBA
+    rgba[mask, 3] = 0.0  # transparent where invalid
+
+    img = (rgba * 255).astype(np.uint8)
+    pil = Image.fromarray(img, mode="RGBA")
+    buf = BytesIO()
+    pil.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def raster_bounds_to_wgs84(bounds, src_crs) -> list[list[float]]:
+    """
+    Return Leaflet bounds: [[south, west], [north, east]] in EPSG:4326.
+    """
+    if src_crs is None:
+        raise ValueError("Raster CRS missing, cannot create basemap overlay.")
+
+    # bounds: left, bottom, right, top in raster CRS
+    left, bottom, right, top = bounds
+    w, s, e, n = transform_bounds(src_crs, "EPSG:4326", left, bottom, right, top, densify_pts=21)
+    return [[s, w], [n, e]]
 
 
 col1, col2 = st.columns([1, 1])
@@ -238,6 +283,9 @@ if geojson_file and red_file and nir_file:
         rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
         st.session_state.preview_rgb = rgb
 
+        st.session_state.ndvi_png = ndvi_to_rgba_png(index_arr, cmap_name="RdYlGn")
+        st.session_state.ndvi_bounds_4326 = raster_bounds_to_wgs84(meta["bounds"], meta["crs"])
+
         st.session_state.results_ready = True
 
 if st.session_state.results_ready:
@@ -254,12 +302,34 @@ if st.session_state.results_ready:
         mime="application/geo+json",
     )
 
-    st.subheader("NDVI preview (colored, downsampled)")
-    st.image(
-        st.session_state.preview_rgb,
-        caption="NDVI colored (RdYlGn), scaled from -1..1",
-        use_container_width=True
-    )
+    st.subheader("NDVI on map (OpenStreetMap + overlay)")
+
+    if st.session_state.ndvi_png is None or st.session_state.ndvi_bounds_4326 is None:
+        st.warning("Map overlay not cached yet. Click 'Compute' once.")
+        st.stop()
+
+    bounds = st.session_state.ndvi_bounds_4326
+    (s, w), (n, e) = bounds
+    center = [(s + n) / 2, (w + e) / 2]
+
+    m = folium.Map(location=center, zoom_start=12, tiles="OpenStreetMap")
+
+    b64 = base64.b64encode(st.session_state.ndvi_png).decode("utf-8")
+    data_url = f"data:image/png;base64,{b64}"
+
+    folium.raster_layers.ImageOverlay(
+        image=data_url,
+        bounds=bounds,
+        opacity=0.75,
+        interactive=True,
+        cross_origin=False,
+        zindex=1,
+    ).add_to(m)
+
+    folium.LayerControl().add_to(m)
+
+    st_folium(m, width="100%", height=600)
+
 
 
 else:
