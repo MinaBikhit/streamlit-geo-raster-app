@@ -33,6 +33,8 @@ if "results_ready" not in st.session_state:
     st.session_state.last_inputs_sig = None
     st.session_state.ndvi_bounds_4326 = None
     st.session_state.ndvi_png = None
+    st.session_state.results_gdf = None
+
 
 def input_signature(geojson_file, red_file, nir_file):
     # A simple signature so if user uploads different files we reset cached results
@@ -64,6 +66,7 @@ if sig != st.session_state.last_inputs_sig:
     st.session_state.preview_rgb = None
     st.session_state.ndvi_png = None
     st.session_state.ndvi_bounds_4326 = None
+    st.session_state.results_gdf = None
     st.session_state.last_inputs_sig = sig
 
 
@@ -201,13 +204,9 @@ if geojson_file and red_file and nir_file:
             st.error("Raster CRS is missing. Cannot align vector to raster CRS safely.")
             st.stop()
 
-        # Reproject vector to raster CRS
         gdf_proj = gdf.to_crs(meta["crs"])
+        raster_bbox = box(*meta["bounds"])
 
-        # --- Overlap check: vector vs raster extent ---
-        raster_bbox = box(*meta["bounds"])  # (left, bottom, right, top)
-
-        # robust: handle empty geometries too
         geom_ok = gdf_proj.geometry.notna() & ~gdf_proj.geometry.is_empty
         intersects = geom_ok & gdf_proj.geometry.intersects(raster_bbox)
 
@@ -218,7 +217,6 @@ if geojson_file and red_file and nir_file:
             )
             st.stop()
 
-        # Compute only for intersecting features
         dropped = int((~intersects).sum())
         kept = int(intersects.sum())
         if dropped > 0:
@@ -258,8 +256,8 @@ if geojson_file and red_file and nir_file:
         stats_df = pd.DataFrame(stats).set_index("feature_index")
         st.write(f"Features with pixels (count>0): {(stats_df['count'] > 0).sum()} / {len(stats_df)}")
 
+        # ✅ build FINAL out_gdf (with stats)
         out_gdf = gdf.loc[intersects.values].copy()
-
         for c in ["mean", "min", "max", "std", "count"]:
             out_gdf[c] = stats_df[c].values
 
@@ -268,27 +266,26 @@ if geojson_file and red_file and nir_file:
 
         st.success("Done.")
 
-        st.subheader("Results (per feature)")
-        st.dataframe(out_gdf.drop(columns="geometry"), use_container_width=True)
+        # ✅ cache the final table
+        st.session_state.results_gdf = out_gdf
 
-        # Cache downloads (so clicking download doesn't recompute)
+        # ✅ cache downloads
         st.session_state.csv_bytes = out_gdf.drop(columns="geometry").to_csv(index=False).encode("utf-8")
         st.session_state.geojson_bytes = out_gdf.to_json().encode("utf-8")
 
-        # Cache colored NDVI preview
-        preview = np.clip(index_arr.copy(), -1, 1)
-        preview = np.nan_to_num(preview, nan=-1.0)
-        cmap = plt.get_cmap("RdYlGn")
-        rgba = cmap((preview + 1) / 2.0)
-        rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
-        st.session_state.preview_rgb = rgb
-
+        # ✅ cache NDVI overlay
         st.session_state.ndvi_png = ndvi_to_rgba_png(index_arr, cmap_name="RdYlGn")
         st.session_state.ndvi_bounds_4326 = raster_bounds_to_wgs84(meta["bounds"], meta["crs"])
 
         st.session_state.results_ready = True
 
-if st.session_state.results_ready:
+if st.session_state.results_ready and st.session_state.results_gdf is not None:
+    st.subheader("Results (per feature)")
+    st.dataframe(
+        st.session_state.results_gdf.drop(columns="geometry"),
+        use_container_width=True
+    )
+
     st.download_button(
         "Download CSV",
         data=st.session_state.csv_bytes,
