@@ -1,0 +1,13 @@
+name: geo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - streamlit
+  - geopandas
+  - rasterio
+  - shapely
+  - pyproj
+  - pandas
+  - numpy
+  - pydeck
