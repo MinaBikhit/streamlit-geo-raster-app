@@ -18,4 +18,4 @@ COPY app /app/app
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "app/main.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["micromamba", "run", "-n", "geo", "streamlit", "run", "app/main.py", "--server.address=0.0.0.0", "--server.port=8501"]
