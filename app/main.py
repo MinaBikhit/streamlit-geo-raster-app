@@ -7,6 +7,7 @@ import geopandas as gpd
 import rasterio
 import streamlit as st
 from shapely.geometry import box
+import matplotlib.pyplot as plt
 
 from core.indices import ndvi
 from core.zonal import zonal_stats_from_index_raster
@@ -17,6 +18,22 @@ st.set_page_config(page_title="Geo+Raster NDVI Zonal Stats", layout="wide")
 st.title("One-click geospatial demo: NDVI + per-polygon mean")
 st.caption("Upload GeoJSON polygons + Sentinel-2 B04 (Red) and B08 (NIR) GeoTIFFs, compute NDVI, then compute per-polygon statistics.")
 
+if "results_ready" not in st.session_state:
+    st.session_state.results_ready = False
+    st.session_state.csv_bytes = None
+    st.session_state.geojson_bytes = None
+    st.session_state.preview_rgb = None
+    st.session_state.last_inputs_sig = None
+
+def input_signature(geojson_file, red_file, nir_file):
+    # A simple signature so if user uploads different files we reset cached results
+    if not (geojson_file and red_file and nir_file):
+        return None
+    return (
+        geojson_file.name, geojson_file.size,
+        red_file.name, red_file.size,
+        nir_file.name, nir_file.size
+    )
 
 with st.sidebar:
     st.header("Inputs")
@@ -29,6 +46,14 @@ with st.sidebar:
     nir_file = st.file_uploader("Upload NIR band (Sentinel-2 B08) [GeoTIFF]", type=["tif", "tiff"])
 
     compute_btn = st.button("Compute NDVI + zonal stats", type="primary", use_container_width=True)
+
+sig = input_signature(geojson_file, red_file, nir_file)
+if sig != st.session_state.last_inputs_sig:
+    st.session_state.results_ready = False
+    st.session_state.csv_bytes = None
+    st.session_state.geojson_bytes = None
+    st.session_state.preview_rgb = None
+    st.session_state.last_inputs_sig = sig
 
 
 @st.cache_data(show_spinner=False)
@@ -193,37 +218,48 @@ if geojson_file and red_file and nir_file:
         for c in ["mean", "min", "max", "std", "count"]:
             out_gdf[c] = stats_df[c].values
 
+        out_gdf = out_gdf.reset_index(drop=True)
+        out_gdf.insert(0, "feature_id", np.arange(1, len(out_gdf) + 1))
+
         st.success("Done.")
 
         st.subheader("Results (per feature)")
         st.dataframe(out_gdf.drop(columns="geometry"), use_container_width=True)
 
-        csv = out_gdf.drop(columns="geometry").to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV",
-            data=csv,
-            file_name="zonal_stats_ndvi.csv",
-            mime="text/csv",
-        )
+        # Cache downloads (so clicking download doesn't recompute)
+        st.session_state.csv_bytes = out_gdf.drop(columns="geometry").to_csv(index=False).encode("utf-8")
+        st.session_state.geojson_bytes = out_gdf.to_json().encode("utf-8")
 
-        # GeoJSON (geometry + attributes + stats)
-        geojson_out = out_gdf.to_json().encode("utf-8")
-        st.download_button(
-            "Download GeoJSON (with stats)",
-            data=geojson_out,
-            file_name="zonal_stats_ndvi.geojson",
-            mime="application/geo+json",
-        )
-
-        # Quick preview of NDVI as an image (downsampled)
-        st.subheader("NDVI preview (downsampled)")
+        # Cache colored NDVI preview
         preview = np.clip(index_arr.copy(), -1, 1)
-        preview = (preview + 1) / 2.0  # -1..1 -> 0..1
-        preview = np.nan_to_num(preview, nan=0.0)
+        preview = np.nan_to_num(preview, nan=-1.0)
+        cmap = plt.get_cmap("RdYlGn")
+        rgba = cmap((preview + 1) / 2.0)
+        rgb = (rgba[:, :, :3] * 255).astype(np.uint8)
+        st.session_state.preview_rgb = rgb
 
-        # Convert to 8-bit so Streamlit displays nicely
-        preview_u8 = (preview * 255).astype(np.uint8)
-        st.image(preview_u8, caption="NDVI scaled to 0..255 for display", use_container_width=True)
+        st.session_state.results_ready = True
+
+if st.session_state.results_ready:
+    st.download_button(
+        "Download CSV",
+        data=st.session_state.csv_bytes,
+        file_name="zonal_stats_ndvi.csv",
+        mime="text/csv",
+    )
+    st.download_button(
+        "Download GeoJSON (with stats)",
+        data=st.session_state.geojson_bytes,
+        file_name="zonal_stats_ndvi.geojson",
+        mime="application/geo+json",
+    )
+
+    st.subheader("NDVI preview (colored, downsampled)")
+    st.image(
+        st.session_state.preview_rgb,
+        caption="NDVI colored (RdYlGn), scaled from -1..1",
+        use_container_width=True
+    )
 
 
 else:
